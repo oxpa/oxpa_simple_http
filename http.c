@@ -88,7 +88,7 @@ int main(int argc, char **argv, char **arge) {
 
     memset(&serv, 0, sizeof(serv));
     serv.sin_family = AF_INET;
-    serv.sin_addr.s_addr = inet_addr("127.0.0.1"); // INADDR_ANY for any address
+    serv.sin_addr.s_addr = inet_addr("192.168.0.2"); // INADDR_ANY for any address
     serv.sin_port = htons(atoi(argv[1]));
 
     mysocket = socket(AF_INET, SOCK_STREAM, 0);
@@ -100,24 +100,34 @@ int main(int argc, char **argv, char **arge) {
     perror(NULL);
     while (consocket) {
         //printf("Incoming connection from %s - sending welcome\n", inet_ntoa(dest.sin_addr));
-        char content_type[]= "HTTP/1.0 200 OK\n\rContent-Type: text/html\r\nConnection: Close\r\n\r\n";
+        char content_type[]= "HTTP/1.0 200 OK\n\rContent-Type: text/html\r\nConnection: Close\r\nContent-Length: 127\r\n\r\n";
         char * buffer;
         //FIXME: MAX_REQUEST_SIZE is not a constant!
         buffer= (char *)malloc( (MAX_REQUEST_SIZE + 1) *sizeof(char));
+	memset(buffer, 0, MAX_REQUEST_SIZE+1);
         buffer[MAX_REQUEST_SIZE]=NULL;
         int bytes_read=read(consocket, buffer, sizeof(buffer));
         parse_request(buffer,bytes_read);
         struct stat *file_stats;
+	file_stats=(struct stat *) malloc(sizeof(struct stat));
         lstat(buffer, file_stats);
+        lstat("index.html", file_stats);
         if (S_ISREG(file_stats->st_mode)){
-            printf("will send file");
+            printf("will send file\n");
             send(consocket, content_type, strlen(content_type), 0);
-            sendfile(consocket, open("index.html",O_RDONLY),0,1500);
-            printf("sent file");
+	    off_t * offset= (off_t *) malloc(sizeof(off_t));
+            memset(offset,0,sizeof(offset));
+            while(*offset!=file_stats->st_size) {
+                sendfile(consocket, open("index.html",O_RDONLY),offset,1500);
+		printf("offset is %i, size is %i \n", *offset, file_stats->st_size);
+            };
+            free(offset);
+	    send(consocket, "\r\n", 2, 0);
+            printf("sent file\n");
         }
-        close(consocket); 
         consocket = accept(mysocket, (struct sockaddr *)&dest, &socksize);
     }
+        close(consocket); 
     close(mysocket);
     return EXIT_SUCCESS;
 };
