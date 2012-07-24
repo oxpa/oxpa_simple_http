@@ -6,5 +6,6 @@ struct request {
     char *  rq_object_requested;//path to a requested object
     char *  rq_object_mime;     //mimetype of a requested object
     int     rq_status;          //request status in HTTP codes.
+    int     rq_size;
     
 };

@@ -1,4 +1,4 @@
 all: 
-	gcc -Wall -o http.test http.c
+	gcc -g -Wall -o http.test http.c
 clean:
 	rm http.test

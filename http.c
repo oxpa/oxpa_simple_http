@@ -26,7 +26,10 @@ extern int errno;
 #define CLIENT_TIMEOUT 60
 #define MAX_REQUEST_SIZE 8192
 #define METHOD_NOT_ALLOWED 405
-#define BAD_REQUEST 400
+#define BAD_REQUEST -400
+#define GOOD_REQUEST -200
+#define MAX_METHOD_LENGTH 4
+#define NUM_OF_METHODS 4
  
 void help() {
     printf("port num is the first argument\n");
@@ -49,6 +52,8 @@ int read_all_request_data(void * ptr){
     
     my_client->cl_rbuffer= (char *) malloc(BUFFER_SIZE); 
     memset(my_client->cl_rbuffer,0,BUFFER_SIZE);
+    my_client->cl_request= (struct request *) malloc (sizeof(struct request));
+    memset(my_client->cl_request,0,sizeof(struct request));
     my_client->cl_bytes_read=read(my_client->cl_fd, my_client->cl_rbuffer, BUFFER_SIZE);
     if (my_client->cl_bytes_read == -1) {
         //an error or a EAGAIN condition
@@ -77,7 +82,7 @@ int read_all_request_data(void * ptr){
             exit(EXIT_FAILURE);
         }else if (count > 0) {
             //read more data. malformed GET/HEAD request
-            return -400;
+            return BAD_REQUEST;
         }else if (count == 0) {
             return my_client->cl_bytes_read;
         }else {
@@ -92,9 +97,80 @@ int read_all_request_data(void * ptr){
 assert(my_client->cl_bytes_read >= -1);
 return EXIT_FAILURE;
 }; 
+void return_400(void * ptr) {
+    printf("return 400\n");
+    struct client * my_client=(struct client *)ptr;
+    my_client->cl_request->rq_status=400;
+    printf("return 400 before first strdup\n");
+    my_client->cl_request->rq_object_mime = strdup("text/html");
+    printf("return 400 after first strdup\n");
 
-        //char content_type[]= "HTTP/1.0 200 OK\n\rContent-Type: text/html\r\nConnection: Close\r\nContent-Length: 127\r\n\r\n";
-int parse_request(events[n].data.ptr);
+    my_client->cl_sbuffer = strdup("HTTP/1.0 400 Bad Request\r\nContent-Type: text/html\r\nConnection: Close\r\nContent-Length: ");
+    my_client->cl_request->rq_object_requested=strdup("400.html");
+}
+int parse_request(void * ptr) {
+    // request have two spaces: after method and after object. Find them.
+    // find out the method and object.
+    struct client * my_client=(struct client *)ptr;
+    char * all_methods[NUM_OF_METHODS+1];
+    all_methods[0]="GET ";
+    all_methods[1]="HEAD ";
+    all_methods[2]="PUT ";
+    all_methods[3]="OPTIONS ";
+    all_methods[4]=NULL;
+    int i;
+    for(i=0;i<NUM_OF_METHODS;i++) {
+        if (strstr(my_client->cl_rbuffer,all_methods[i]) == my_client->cl_rbuffer ) {
+            break;
+        }
+    }
+    printf("parse request after for all methods. i is %i\n", i);
+    //we got all_methods[i] request
+    
+    if (all_methods[i] == NULL) {
+        return_400(ptr);
+        return BAD_REQUEST;
+    }
+    printf("%i %i %i\n", my_client->cl_rbuffer , strlen(all_methods[i]) , my_client->cl_bytes_read);
+    char * second_space=memchr(my_client->cl_rbuffer + strlen(all_methods[i]),' ',my_client->cl_bytes_read - strlen(all_methods[i]));
+    printf("parse request. second space is %i\n", second_space);
+    if (second_space == 0) {
+        return_400(ptr);
+        return BAD_REQUEST;
+    }else{
+        char * all_http_versions[3];
+        all_http_versions[0]="HTTP/0.9\r\n";
+        all_http_versions[1]="HTTP/1.0\r\n";
+        all_http_versions[2]="HTTP/1.1\r\n";
+        int j;
+        for(j=0;j<3;j++){
+            if (strstr(second_space,all_http_versions[j]) == second_space + 1 ){
+                break;
+            }
+        }
+        //here I have "METHOD SPACE SOMEBYTES HTTP_VERSION" string for sure. 
+        //need to get object from bytes.
+        //FIXME: object is not only a file!
+        //
+        int my_shift = my_client->cl_rbuffer + strlen(all_methods[i]) == '/' ? strlen(all_methods[i]) + 1 : strlen(all_methods[i]);
+        my_client->cl_request->rq_object_requested = strndup(my_client->cl_rbuffer + my_shift, my_client->cl_rbuffer - second_space - my_shift);
+
+        struct stat *file_stats;
+        file_stats=(struct stat *) malloc(sizeof(struct stat));
+        lstat(my_client->cl_request->rq_object_requested, file_stats);
+        if (S_ISREG(file_stats->st_mode)){
+            my_client->cl_request->rq_size=file_stats->st_size;
+
+            my_client->cl_request->rq_status=200;
+            my_client->cl_request->rq_object_mime = strdup("text/html");
+            my_client->cl_sbuffer = strdup("HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nConnection: Close\r\nContent-Length: ");           
+            
+    printf("parse request will exit now\n");
+            return GOOD_REQUEST;
+        }
+    };
+    
+};
 
 
 /*
@@ -213,6 +289,16 @@ int main(int argc, char **argv, char **arge) {
                     }
                 } else if (events[n].events & EPOLLOUT){
                     //send output
+                    struct client * my_client= (struct client *) events[n].data.ptr;
+
+                    char size[16];
+                    snprintf(size,"%i\n",my_client->cl_request->rq_size);
+                    printf("%i\n",my_client->cl_request->rq_size);
+                    printf("client fd is %i,buffer is %s\n ", my_client->cl_fd,my_client->cl_sbuffer );
+                    send(my_client->cl_fd,my_client->cl_sbuffer,strlen(my_client->cl_sbuffer),0);
+                    send(my_client->cl_fd,size,16,0);
+                    sendfile(my_client->cl_fd, open(my_client->cl_request->rq_object_requested,O_RDONLY),my_client->cl_bytes_sent,1500);
+                    
                 } else if (events[n].events & EPOLLHUP) {
                     //remove client and close fd
                 }
