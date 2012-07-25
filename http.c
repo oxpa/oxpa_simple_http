@@ -14,9 +14,11 @@
 #include <errno.h>
 #include <assert.h>
 #include <time.h>
+#include <dirent.h>
+#include <signal.h>
+
 
 extern int errno;
-
 #include "client.h"
 #include "request.h"
 #include "urldecode.h"
@@ -37,11 +39,15 @@ extern int errno;
 #define MAX_METHOD_LENGTH 4
 #define NUM_OF_METHODS 4
 
+#define LISTEN_ADDRESS 192.168.0.2
+#define HOST_ADDRESS "http://192.168.0.2:8883"
+
 #define RETURN_GOOD 1
 #define RETURN_BAD 0
 #define NOT_MALLOCCED 0
 #define IS_MALLOCCED 1
  
+char * host_address;
 void help() {
     printf("port num is the first argument\n");
     printf("message is the second argument\n");
@@ -223,7 +229,7 @@ int parse_request(void * ptr) {
         //FIXME: object is not only a file!
         //
         char * k;
-        while( k=strstr(my_client->cl_rbuffer,"//")){
+        while( (k=strstr(my_client->cl_rbuffer,"//"))&&(k<second_space)){
             second_space--;
             while(k<my_client->cl_rbuffer+my_client->cl_bytes_read){
              *k=*(k+1);
@@ -232,11 +238,11 @@ int parse_request(void * ptr) {
         }
         int my_shift = * (my_client->cl_rbuffer + strlen(all_methods[i])) == '/' ? strlen(all_methods[i]) + 1 : strlen(all_methods[i]);
         char * raw_object_request=strndup(my_client->cl_rbuffer + my_shift, second_space - my_client->cl_rbuffer - my_shift);
+        /*
         if (strlen(raw_object_request)<1) {
             free(raw_object_request);
             raw_object_request=strdup("index.html");
-        }
-        printf("%s \n", raw_object_request);
+        }*/
         char * decoded_object_request = url_decode(raw_object_request);
         free(raw_object_request);
         my_client->cl_request->rq_object_requested = realpath(decoded_object_request, NULL);
@@ -334,6 +340,8 @@ int send_headers(void * ptr){
         my_client->cl_bytes_sent=0;
         if (my_client->cl_request != RQ_HEAD) {
             send_data(ptr);
+        }else{
+            free_client(my_client,NOT_MALLOCCED);
         }
     }
 }
@@ -341,7 +349,10 @@ int send_data(void * ptr){
     struct client * my_client=(struct client *)ptr;
     //send file until EAGAIN or EWOULDBLOCK or other error
     do {
-        int bytes_sent=sendfile(my_client->cl_fd, open(my_client->cl_request->rq_object_requested,O_RDONLY),&my_client->cl_bytes_sent,my_client->cl_request->rq_size);
+        //FIXME: open_fd should be in struct client and persistent
+	int open_fd=open(my_client->cl_request->rq_object_requested,O_RDONLY);
+        int bytes_sent=sendfile(my_client->cl_fd, open_fd,&my_client->cl_bytes_sent,my_client->cl_request->rq_size);
+	close(open_fd);
         if(bytes_sent >=0) {
             //do nothing, just continue buffer filling
             my_client->cl_last_seen=time(NULL);
@@ -366,6 +377,55 @@ int send_data(void * ptr){
         };
     } while(1);
 }
+void * get_dir_object(void * ptr) {
+    struct client * my_client=(struct client *)ptr;
+    int has_index=0;
+    DIR *dp;
+    struct dirent *ep;
+    dp = opendir (my_client->cl_request->rq_object_requested);
+    if (dp != NULL) {
+	char * template=strdup("/tmp/simple-http-XXXXXX");
+        int temp_fd=mkstemp (template);
+        FILE* temp_file = fdopen(temp_fd, "w");	
+        if ( temp_file > 0 ) {
+	    fprintf(temp_file,"<!DOCTYPE html> <html> <body> <h1>Directory:<h1><br/><br/>\n");
+            while (ep = readdir (dp)){
+		if ((strcmp(ep->d_name, ".")!=0) && (strcmp(ep->d_name, "..")!=0)){
+		 if (strcmp(ep->d_name,"index.html")==0) {has_index=1; break;};
+		 fprintf(temp_file,"<a href=\"http://%s/%s/%s\">%s</a><br/>\n",\
+                                    host_address,basename(my_client->cl_request->rq_object_requested),\
+                                     ep->d_name, ep->d_name);
+                }
+            }
+            fprintf(temp_file,"</body> </html>\n");
+            if (has_index==0) {
+                free(my_client->cl_request->rq_object_requested);
+                my_client->cl_request->rq_object_requested=strdup(template);
+            }else{
+                int buffer_size=(strlen(my_client->cl_request->rq_object_requested)+\
+                                           strlen("/index.html")+1)\
+                                           *sizeof(char);
+                char*buffer=(char*)malloc(buffer_size);
+                memset(buffer,0,buffer_size);
+                strcat(buffer,my_client->cl_request->rq_object_requested);
+		strcat(buffer,"/index.html");
+                free(my_client->cl_request->rq_object_requested);
+                my_client->cl_request->rq_object_requested=buffer;
+            }
+            fclose(temp_file);
+            close(temp_fd);
+        }
+       free(template);
+       (void) closedir (dp);
+   
+    } else {
+        perror ("Couldn't open the directory");
+        my_client->cl_request->rq_status=503;
+        return_503(my_client);
+    }
+    return my_client; 
+    
+}
 int prepare_answer_buffer(void * ptr){
     struct client * my_client=(struct client *)ptr;
 
@@ -388,7 +448,7 @@ int prepare_answer_buffer(void * ptr){
                 images[1]=".jpeg";
                 images[2]=".png";
                 images[3]=NULL;
-                int i;
+		int i;
                 for(i=0;i<3;i++){
                     if(strcasestr(dot,images[i])==dot) {break;};
                 }
@@ -411,7 +471,12 @@ int prepare_answer_buffer(void * ptr){
             sprintf(my_client->cl_sbuffer,format,my_client->cl_request->rq_object_mime);
 
             free(file_stats);
-        }
+        }else if (S_ISDIR(file_stats->st_mode)){
+            free(file_stats);
+	    prepare_answer_buffer(get_dir_object(my_client));
+            return RETURN_GOOD;
+                
+	}
     }
 
     char size[18];
@@ -451,8 +516,10 @@ int main(int argc, char **argv, char **arge) {
 
     memset(&serv, 0, sizeof(serv));
     serv.sin_family = AF_INET;
-    serv.sin_addr.s_addr = inet_addr("192.168.0.2"); // INADDR_ANY for any address
-    serv.sin_port = htons(atoi(argv[1]));
+    serv.sin_addr.s_addr = inet_addr(argv[1]); // INADDR_ANY for any address
+    serv.sin_port = htons(atoi(argv[2]));
+    host_address=(char*)malloc((strlen(argv[1])+strlen(argv[2])+2)*sizeof(char) );
+    sprintf(host_address,"%s:%s",argv[1],argv[2]);
 
     mysocket = socket(AF_INET, SOCK_STREAM, 0);
     int optval,optlen;
@@ -472,7 +539,7 @@ int main(int argc, char **argv, char **arge) {
         perror("error adding mysocket to epoll");
         exit(EXIT_FAILURE);
     }
-
+    signal (SIGPIPE, SIG_IGN);
     do {
         nfds = epoll_wait(epollfd, events, EXPECTED_CLIENTS, EPOLL_TIMEOUT);
         if (nfds == -1) {
