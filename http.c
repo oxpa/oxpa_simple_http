@@ -27,6 +27,7 @@ extern int errno;
 #define EPOLL_TIMEOUT 1000
 #define CLIENT_TIMEOUT 60
 #define MAX_REQUEST_SIZE 8192
+//#define MAX_REQUEST_SIZE 20
 #define METHOD_NOT_ALLOWED 405
 #define BAD_REQUEST -400
 #define GOOD_REQUEST -200
@@ -62,7 +63,7 @@ int client_timeout (void * ptr){
     return my_client->cl_first_seen - time(NULL) > CLIENT_TIMEOUT ? EXIT_FAILURE:EXIT_SUCCESS;
 };
 int read_all_request_data(void * ptr){
-#define BUFFER_SIZE 8192    //just a magic number. FIXME: should be a page size or so
+#define BUFFER_SIZE MAX_REQUEST_SIZE    //just a magic number. FIXME: should be a page size or so
     struct client * my_client = (struct client *)ptr;
     
     my_client->cl_rbuffer= (char *) malloc(BUFFER_SIZE); 
@@ -137,7 +138,7 @@ void return_code(void * ptr, int code) {
                     page=strdup("503.html");
                     break;
     }
-    //FIXME: fill in **rq_headers, not just a string!
+    //FIXME: fill in **rq_headers, not just a string! prepare_answer_buffer() should do this!
     char * format = "HTTP/1.0 %s\r\nContent-Type: text/html\r\nConnection: Close\r\nContent-Length: ";
     my_client->cl_sbuffer = (char *) malloc ( (strlen(buffer)+strlen(format)-2/*%s*/+1/*\0*/)*sizeof(char) );
     memset(my_client->cl_sbuffer,0,(strlen(buffer)+strlen(format)-2/*%s*/+1/*\0*/)*sizeof(char));
@@ -221,8 +222,21 @@ int parse_request(void * ptr) {
         //need to get object from bytes.
         //FIXME: object is not only a file!
         //
+        char * k;
+        while( k=strstr(my_client->cl_rbuffer,"//")){
+            second_space--;
+            while(k<my_client->cl_rbuffer+my_client->cl_bytes_read){
+             *k=*(k+1);
+             k++;
+            }
+        }
         int my_shift = * (my_client->cl_rbuffer + strlen(all_methods[i])) == '/' ? strlen(all_methods[i]) + 1 : strlen(all_methods[i]);
         char * raw_object_request=strndup(my_client->cl_rbuffer + my_shift, second_space - my_client->cl_rbuffer - my_shift);
+        if (strlen(raw_object_request)<1) {
+            free(raw_object_request);
+            raw_object_request=strdup("index.html");
+        }
+        printf("%s \n", raw_object_request);
         char * decoded_object_request = url_decode(raw_object_request);
         free(raw_object_request);
         my_client->cl_request->rq_object_requested = realpath(decoded_object_request, NULL);
@@ -249,19 +263,7 @@ int parse_request(void * ptr) {
         }
         free(content_root);
 
-        struct stat *file_stats;
-        file_stats=(struct stat *) malloc(sizeof(struct stat));
-        lstat(my_client->cl_request->rq_object_requested, file_stats);
-        if (S_ISREG(file_stats->st_mode)){
-            my_client->cl_request->rq_size=file_stats->st_size;
-
-            my_client->cl_request->rq_status=200;
-            my_client->cl_request->rq_object_mime = strdup("text/html");
-            my_client->cl_sbuffer = strdup("HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nConnection: Close\r\nContent-Length: ");           
-            
-            free(file_stats);
-            return GOOD_REQUEST;
-        }
+        return GOOD_REQUEST;
     };
     
 };
@@ -288,7 +290,11 @@ void free_client(struct client * my_client, int mallocced){
         free(my_client->cl_request);
 
     }
-    if (mallocced==1) free(my_client);
+    if (mallocced==1) {
+            free(my_client);
+    }else{
+        memset(my_client,0,sizeof(struct client));
+    };
 }
 /*
  * Simple helper function: sets fd to non blocking IO.
@@ -336,15 +342,13 @@ int send_data(void * ptr){
     //send file until EAGAIN or EWOULDBLOCK or other error
     do {
         int bytes_sent=sendfile(my_client->cl_fd, open(my_client->cl_request->rq_object_requested,O_RDONLY),&my_client->cl_bytes_sent,my_client->cl_request->rq_size);
-        if(bytes_sent >0) {
+        if(bytes_sent >=0) {
             //do nothing, just continue buffer filling
             my_client->cl_last_seen=time(NULL);
-            if (bytes_sent==my_client->cl_request->rq_size) {
+            if ((bytes_sent==my_client->cl_request->rq_size)||(bytes_sent + my_client->cl_bytes_sent==my_client->cl_request->rq_size)) {
                 free_client(my_client,NOT_MALLOCCED);
                 return RETURN_GOOD;
             };
-        }else if (bytes_sent ==0 ) {
-             assert(bytes_sent!=0);
         }else if(bytes_sent==-1){
             switch (errno){
                 case EAGAIN:
@@ -364,9 +368,55 @@ int send_data(void * ptr){
 }
 int prepare_answer_buffer(void * ptr){
     struct client * my_client=(struct client *)ptr;
+
+    if (my_client->cl_sbuffer ==0) {
+        //there was no return_code call previously. prepare full answer;
+        struct stat *file_stats;
+        file_stats=(struct stat *) malloc(sizeof(struct stat));
+        lstat(my_client->cl_request->rq_object_requested, file_stats);
+        if (S_ISREG(file_stats->st_mode)){
+            my_client->cl_request->rq_size=file_stats->st_size;
+
+            my_client->cl_request->rq_status=200;
+            char * dot = memrchr(my_client->cl_request->rq_object_requested,'.',strlen(my_client->cl_request->rq_object_requested));
+            my_client->cl_request->rq_object_mime = strdup("text/html");
+            if (dot != NULL) {
+                //try do some mime magic
+                //FIXME: use something like system("file") can do;
+                char * images[4];
+                images[0]=".gif";
+                images[1]=".jpeg";
+                images[2]=".png";
+                images[3]=NULL;
+                int i;
+                for(i=0;i<3;i++){
+                    if(strcasestr(dot,images[i])==dot) {break;};
+                }
+                printf("i is %i, dot is %i\n",i,dot);
+                if (images[i]!=NULL) {
+                    free(my_client->cl_request->rq_object_mime);
+                    my_client->cl_request->rq_object_mime = (char *) malloc((strlen("image/;charset=binary")+strlen(images[i]))*sizeof(char));
+                    memset(my_client->cl_request->rq_object_mime,0,(strlen("image/;charset=binary")+strlen(images[i]))*sizeof(char));
+                    if (my_client->cl_request->rq_object_mime == NULL) {
+                        perror("malloc rq_object_mime");
+                        exit(EXIT_FAILURE);
+                    };
+                    sprintf(my_client->cl_request->rq_object_mime,"image/%s;charset=binary",images[i]+1);
+                }
+            }
+
+            char format[]="HTTP/1.0 200 OK\r\nContent-Type: %s\r\nConnection: Close\r\nContent-Length: ";
+            my_client->cl_sbuffer = (char *) malloc((strlen(format)+strlen(my_client->cl_request->rq_object_mime))*sizeof(char));
+            memset(my_client->cl_sbuffer,0,(strlen(format)+strlen(my_client->cl_request->rq_object_mime))*sizeof(char));
+            sprintf(my_client->cl_sbuffer,format,my_client->cl_request->rq_object_mime);
+
+            free(file_stats);
+        }
+    }
+
     char size[18];
     snprintf(size,18,"%i\r\n",my_client->cl_request->rq_size);
-    char * new_buffer=realloc(my_client->cl_sbuffer,strlen(my_client->cl_sbuffer)+strlen(size));
+    char * new_buffer=realloc(my_client->cl_sbuffer,(strlen(my_client->cl_sbuffer)+strlen(size)+2+1)*sizeof(char));
     if (new_buffer == NULL) {
         //FIXME: no mo memory is not such a big problem, actually. 
         perror("can't realloc memory for buffer!");
@@ -481,18 +531,18 @@ int main(int argc, char **argv, char **arge) {
                 } else if (events[n].events & EPOLLOUT){
                     //send output
                     struct client * my_client= (struct client *) events[n].data.ptr;
-                    if (my_client->cl_bytes_sent>=strlen(my_client->cl_sbuffer)+my_client->cl_request->rq_size) {
+                    if ((my_client->cl_bytes_sent == my_client->cl_request->rq_size)&&(my_client->cl_header_sent ==1)) {
                         //sent all data. close socket to the client and free all allocated memory.
                         free_client(my_client,NOT_MALLOCCED);
                     }else{
                         //some data need to be sent. do it.
                         if ((my_client->cl_bytes_sent < strlen(my_client->cl_sbuffer))&&(my_client->cl_header_sent !=1)) {
                             send_headers(my_client);
-                        }else if((my_client->cl_bytes_sent < strlen(my_client->cl_sbuffer))&&(my_client->cl_header_sent ==1)) {
+                        }else if(my_client->cl_header_sent ==1) {
                             //send file until EAGAIN or EWOULDBLOCK or other error
                             send_data(my_client);
                         }else {
-                            assert(((my_client->cl_bytes_sent < strlen(my_client->cl_sbuffer))&&(my_client->cl_header_sent ==1)));
+                            assert(((my_client->cl_bytes_sent != strlen(my_client->cl_sbuffer))&&(my_client->cl_header_sent ==1)));
                             exit(EXIT_FAILURE); 
                         }
                     }
