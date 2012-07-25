@@ -451,10 +451,12 @@ int main(int argc, char **argv, char **arge) {
 
     memset(&serv, 0, sizeof(serv));
     serv.sin_family = AF_INET;
-    serv.sin_addr.s_addr = inet_addr("192.168.1.47"); // INADDR_ANY for any address
+    serv.sin_addr.s_addr = inet_addr("192.168.0.2"); // INADDR_ANY for any address
     serv.sin_port = htons(atoi(argv[1]));
 
     mysocket = socket(AF_INET, SOCK_STREAM, 0);
+    int optval,optlen;
+    setsockopt(mysocket, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
     bind(mysocket, (struct sockaddr *)&serv, sizeof(struct sockaddr));
     listen(mysocket, EXPECTED_CLIENTS);
     
