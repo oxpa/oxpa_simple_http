@@ -238,11 +238,12 @@ int parse_request(void * ptr) {
         }
         int my_shift = * (my_client->cl_rbuffer + strlen(all_methods[i])) == '/' ? strlen(all_methods[i]) + 1 : strlen(all_methods[i]);
         char * raw_object_request=strndup(my_client->cl_rbuffer + my_shift, second_space - my_client->cl_rbuffer - my_shift);
-        /*
+        
+	//FIXME: chech index.html presence before use
         if (strlen(raw_object_request)<1) {
             free(raw_object_request);
             raw_object_request=strdup("index.html");
-        }*/
+        }
         char * decoded_object_request = url_decode(raw_object_request);
         free(raw_object_request);
         my_client->cl_request->rq_object_requested = realpath(decoded_object_request, NULL);
