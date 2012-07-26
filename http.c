@@ -80,9 +80,9 @@ int read_all_request_data(void * ptr){
     if (my_client->cl_bytes_read == -1) {
         //an error or a EAGAIN condition
         if ((errno != EAGAIN) && (errno != EWOULDBLOCK )) {
-            //FIXME: should just close connection.
-            perror("client read error");
-            exit(EXIT_FAILURE);
+            //FIXME: should just close connection. +
+            free_client(my_client);
+            return RETURN_BAD;
         };
         //EAGAIN: all available data is read.
         //HOW THIS COULD HAPPEN?!
