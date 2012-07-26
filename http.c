@@ -89,8 +89,15 @@ int read_all_request_data(void * ptr){
         assert(my_client->cl_bytes_read > -1);
 
     } else if (my_client->cl_bytes_read < BUFFER_SIZE) {
-        //read all available data
-        return my_client->cl_bytes_read;
+        //read all available data for now
+        if (strstr(my_client->cl_rbuffer,"\r\n")){
+            //have at least 1 string, can parse request
+            return my_client->cl_bytes_read;
+        }else {
+            //have to read more input
+            return RETURN_BAD;
+        }
+            
 
     } else if (my_client->cl_bytes_read == BUFFER_SIZE) {
         // some data still may be available. 
