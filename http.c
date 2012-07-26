@@ -396,15 +396,17 @@ void * get_dir_object(void * ptr) {
         int temp_fd=mkstemp (template);
         FILE* temp_file = fdopen(temp_fd, "w");	
         if ( temp_file > 0 ) {
-	    fprintf(temp_file,"<!DOCTYPE html> <html> <body> <h1>Directory:<h1><br/><br/>\n");
+	        fprintf(temp_file,"<!DOCTYPE html> <html> <body> <h1>Directory:</h1><br/><br/>\n");
+            char * current_content_root=get_content_root();
             while (ep = readdir (dp)){
-		if ((strcmp(ep->d_name, ".")!=0) && (strcmp(ep->d_name, "..")!=0)){
-		 if (strcmp(ep->d_name,"index.html")==0) {has_index=1; break;};
-		 fprintf(temp_file,"<a href=\"http://%s/%s/%s\">%s</a><br/>\n",\
-                                    host_address,basename(my_client->cl_request->rq_object_requested),\
-                                     ep->d_name, ep->d_name);
+		        if ((strcmp(ep->d_name, ".")!=0) && (strcmp(ep->d_name, "..")!=0)){
+		            if (strcmp(ep->d_name,"index.html")==0) {has_index=1; break;};
+		            fprintf(temp_file,"<a href=\"%s/%s\">%s</a><br/>\n",\
+                                  my_client->cl_request->rq_object_requested+strlen(current_content_root),\
+                                         ep->d_name, ep->d_name);
                 }
             }
+            free(current_content_root);
             fprintf(temp_file,"</body> </html>\n");
             if (has_index==0) {
                 free(my_client->cl_request->rq_object_requested);
