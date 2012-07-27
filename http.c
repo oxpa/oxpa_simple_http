@@ -1,7 +1,14 @@
+
+#define _GNU_SOURCE
+#define _BSD_SOURCE
+#define _XOPEN_SOURCE 500 
+
 #include <sys/stat.h>
 #include <fcntl.h>
 
 #include <syslog.h>
+#include <unistd.h>
+#include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,7 +74,37 @@ char * get_content_root() {
 int client_timeout (void * ptr){
     struct client * my_client = (struct client *)ptr;
     return my_client->cl_first_seen - time(NULL) > CLIENT_TIMEOUT ? EXIT_FAILURE:EXIT_SUCCESS;
-};
+}
+
+void free_client(struct client * my_client, int mallocced){
+    //close fd and check for any memory allocations done;
+    close(my_client->cl_fd);
+    free(my_client->cl_rbuffer);
+    free(my_client->cl_sbuffer);
+    if (my_client->cl_request){
+        free (my_client->cl_request->rq_request_line);
+        free(my_client->cl_request->rq_object_requested);
+        free(my_client->cl_request->rq_object_mime);
+        int i=0;
+        for(i=0;i<my_client->cl_request->rq_num_of_headers;i++){
+            free(my_client->cl_request->rq_headers[i]);
+        }
+        for(i=0;i<my_client->cl_request->rq_num_of_params;i++){
+            free(my_client->cl_request->rq_parameters[i]);
+        }
+        //free(my_client->cl_request->rq_headers);
+        //free(my_client->cl_request->rq_parameters);
+        free(my_client->cl_request);
+
+    }
+    if (mallocced==1) {
+            free(my_client);
+    }else{
+        memset(my_client,0,sizeof(struct client));
+    };
+}
+
+
 int read_all_request_data(void * ptr){
 #define BUFFER_SIZE MAX_REQUEST_SIZE    //just a magic number. FIXME: should be a page size or so
     struct client * my_client = (struct client *)ptr;
@@ -81,7 +118,7 @@ int read_all_request_data(void * ptr){
         //an error or a EAGAIN condition
         if ((errno != EAGAIN) && (errno != EWOULDBLOCK )) {
             //FIXME: should just close connection. +
-            free_client(my_client);
+            free_client(my_client,NOT_MALLOCCED);
             return RETURN_BAD;
         };
         //EAGAIN: all available data is read.
@@ -283,33 +320,7 @@ int parse_request(void * ptr) {
 };
 
 
-void free_client(struct client * my_client, int mallocced){
-    //close fd and check for any memory allocations done;
-    close(my_client->cl_fd);
-    free(my_client->cl_rbuffer);
-    free(my_client->cl_sbuffer);
-    if (my_client->cl_request){
-        free (my_client->cl_request->rq_request_line);
-        free(my_client->cl_request->rq_object_requested);
-        free(my_client->cl_request->rq_object_mime);
-        int i=0;
-        for(i=0;i<my_client->cl_request->rq_num_of_headers;i++){
-            free(my_client->cl_request->rq_headers[i]);
-        }
-        for(i=0;i<my_client->cl_request->rq_num_of_params;i++){
-            free(my_client->cl_request->rq_parameters[i]);
-        }
-        //free(my_client->cl_request->rq_headers);
-        //free(my_client->cl_request->rq_parameters);
-        free(my_client->cl_request);
 
-    }
-    if (mallocced==1) {
-            free(my_client);
-    }else{
-        memset(my_client,0,sizeof(struct client));
-    };
-}
 /*
  * Simple helper function: sets fd to non blocking IO.
  */
@@ -322,44 +333,14 @@ int set_nonblocking(int fd) {
     };
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
-int send_headers(void * ptr){
-    struct client * my_client=(struct client *)ptr;
-    size_t bytes_sent=send(my_client->cl_fd,my_client->cl_sbuffer + my_client->cl_bytes_sent,strlen(my_client->cl_sbuffer),0);
-    if (bytes_sent == -1) {
-        switch(errno){
-            case EAGAIN:
-#if EAGAIN != EWOULDBLOCK
-            case EWOULDBLOCK:
-#endif
-                    // smth strange: we could write, but can't now. Just wait till timeout
-                    break;
-            default:
-                    // an error have occured. remove client
-                    free_client(my_client,NOT_MALLOCCED);
-        }
-    }else if (bytes_sent < strlen(my_client->cl_sbuffer)) {
-        //sent a part of headers. continue sending it.
-        my_client->cl_last_seen=time(NULL);
-        my_client->cl_bytes_sent += bytes_sent;
-    }else if (bytes_sent == strlen(my_client->cl_sbuffer)) {
-        //headers are sent. zero cl_bytes_sent and start object transfer right now! 
-        //There would be no "next iteration" if the buffer is not filled up;
-        my_client->cl_header_sent=1;
-        my_client->cl_bytes_sent=0;
-        if (my_client->cl_request != RQ_HEAD) {
-            send_data(ptr);
-        }else{
-            free_client(my_client,NOT_MALLOCCED);
-        }
-    }
-}
+
 int send_data(void * ptr){
     struct client * my_client=(struct client *)ptr;
     //send file until EAGAIN or EWOULDBLOCK or other error
     do {
         //FIXME: open_fd should be in struct client and persistent
 	int open_fd=open(my_client->cl_request->rq_object_requested,O_RDONLY);
-        int bytes_sent=sendfile(my_client->cl_fd, open_fd,&my_client->cl_bytes_sent,my_client->cl_request->rq_size);
+        int bytes_sent=sendfile(my_client->cl_fd, open_fd,(off_t*)&my_client->cl_bytes_sent,my_client->cl_request->rq_size);
 	close(open_fd);
         if(bytes_sent >=0) {
             //do nothing, just continue buffer filling
@@ -385,6 +366,43 @@ int send_data(void * ptr){
         };
     } while(1);
 }
+
+int send_headers(void * ptr){
+    struct client * my_client=(struct client *)ptr;
+    size_t bytes_sent=send(my_client->cl_fd,my_client->cl_sbuffer + my_client->cl_bytes_sent,strlen(my_client->cl_sbuffer),0);
+    if (bytes_sent == -1) {
+        switch(errno){
+            case EAGAIN:
+#if EAGAIN != EWOULDBLOCK
+            case EWOULDBLOCK:
+#endif
+                    // smth strange: we could write, but can't now. Just wait till timeout
+                    break;
+            default:
+                    // an error have occured. remove client
+                    free_client(my_client,NOT_MALLOCCED);
+        }
+    }else if (bytes_sent < strlen(my_client->cl_sbuffer)) {
+        //sent a part of headers. continue sending it.
+        my_client->cl_last_seen=time(NULL);
+        my_client->cl_bytes_sent += bytes_sent;
+    }else if (bytes_sent == strlen(my_client->cl_sbuffer)) {
+        //headers are sent. zero cl_bytes_sent and start object transfer right now! 
+        //There would be no "next iteration" if the buffer is not filled up;
+        my_client->cl_header_sent=1;
+        my_client->cl_bytes_sent=0;
+        if (my_client->cl_request->rq_method != RQ_HEAD) {
+            send_data(ptr);
+        }else{
+            free_client(my_client,NOT_MALLOCCED);
+        }
+    }else {
+        assert(bytes_sent < strlen(my_client->cl_sbuffer));
+    }
+return RETURN_BAD;
+
+}
+
 void * get_dir_object(void * ptr) {
     struct client * my_client=(struct client *)ptr;
     int has_index=0;
@@ -398,7 +416,7 @@ void * get_dir_object(void * ptr) {
         if ( temp_file > 0 ) {
 	        fprintf(temp_file,"<!DOCTYPE html> <html> <body> <h1>Directory:</h1><br/><br/>\n");
             char * current_content_root=get_content_root();
-            while (ep = readdir (dp)){
+            while ((ep = readdir (dp))){
 		        if ((strcmp(ep->d_name, ".")!=0) && (strcmp(ep->d_name, "..")!=0)){
 		            if (strcmp(ep->d_name,"index.html")==0) {has_index=1; break;};
 		            fprintf(temp_file,"<a href=\"%s/%s\">%s</a><br/>\n",\
@@ -448,7 +466,7 @@ int prepare_answer_buffer(void * ptr){
             my_client->cl_request->rq_size=file_stats->st_size;
 
             my_client->cl_request->rq_status=200;
-            char * dot = memrchr(my_client->cl_request->rq_object_requested,'.',strlen(my_client->cl_request->rq_object_requested));
+            char * dot = memrchr(my_client->cl_request->rq_object_requested,'.',(size_t)strlen(my_client->cl_request->rq_object_requested));
             my_client->cl_request->rq_object_mime = strdup("text/html");
             if (dot != NULL) {
                 //try do some mime magic
@@ -462,7 +480,7 @@ int prepare_answer_buffer(void * ptr){
                 for(i=0;i<3;i++){
                     if(strcasestr(dot,images[i])==dot) {break;};
                 }
-                printf("i is %i, dot is %i\n",i,dot);
+                //printf("i is %i, dot is %i\n",i,dot);
                 if (images[i]!=NULL) {
                     free(my_client->cl_request->rq_object_mime);
                     my_client->cl_request->rq_object_mime = (char *) malloc((strlen("image/;charset=binary")+strlen(images[i]))*sizeof(char));
@@ -532,7 +550,7 @@ int main(int argc, char **argv, char **arge) {
     sprintf(host_address,"%s:%s",argv[1],argv[2]);
 
     mysocket = socket(AF_INET, SOCK_STREAM, 0);
-    int optval,optlen;
+    int optval;
     setsockopt(mysocket, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
     bind(mysocket, (struct sockaddr *)&serv, sizeof(struct sockaddr));
     listen(mysocket, EXPECTED_CLIENTS);
