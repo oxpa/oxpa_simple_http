@@ -160,8 +160,8 @@ int read_all_request_data(void * ptr){
         assert(my_client->cl_bytes_read <= BUFFER_SIZE);
         return EXIT_FAILURE;
     }
-assert(my_client->cl_bytes_read >= -1);
-return EXIT_FAILURE;
+    assert(my_client->cl_bytes_read >= -1);
+    return EXIT_FAILURE;
 }
 
 void return_code(void * ptr, int code) {
